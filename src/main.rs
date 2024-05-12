@@ -1,3 +1,4 @@
+
 use std::{
     fmt::Display,
     io,
@@ -8,11 +9,7 @@ use std::{
 use dashmap::DashMap;
 use flate2::{Compress, Compression, Status};
 use rocket::{
-    build,
-    fs::{FileServer, FileServerResponse, Index, NormalizeDirs, Options, Rewrite},
-    http::Header,
-    launch,
-    tokio::io::{AsyncReadExt, AsyncWriteExt},
+    build, fs::{FileServer, FileServerResponse, Index, NormalizeDirs, Options, Rewrite}, http::Header, launch, tokio::io::{AsyncReadExt, AsyncWriteExt}
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -216,11 +213,12 @@ impl Rewrite for CachedCompression {
 
 #[launch]
 fn launch() -> _ {
-    build().mount(
-        "/",
-        FileServer::new("static", Options::None)
-            .rewrite(NormalizeDirs)
-            .rewrite(Index("index.txt"))
-            .rewrite(CachedCompression::new()),
-    )
+    build()
+        .mount(
+            "/",
+            FileServer::new("static", Options::None)
+                .rewrite(NormalizeDirs)
+                .rewrite(Index("index.txt"))
+                .rewrite(CachedCompression::new()),
+        )
 }
