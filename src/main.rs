@@ -1,4 +1,3 @@
-
 use std::{
     fmt::Display,
     io,
@@ -60,11 +59,11 @@ impl CachedCompression {
             .flat_map(|v| v.split(|c| c == ','))
             .filter_map(|coding| {
                 // TODO: Parsing Hack. Filters everything after the `;`, and the whole item if `q = 0`
-                if coding.contains(';') {
-                    if let Some((_, val)) = coding.split_once('=') {
+                if let Some((name, params)) = coding.split_once(';') {
+                    if let Some((param_name, val)) = params.split_once('=') {
                         let val: f32 = val.trim().parse().unwrap_or(0.);
-                        if val != 0. {
-                            Some(coding.split_once(';').unwrap().0.trim())
+                        if val != 0. || param_name.trim() != "q" {
+                            Some(name.trim())
                         } else {
                             None
                         }
@@ -79,7 +78,7 @@ impl CachedCompression {
             .nth(0)
     }
 
-    fn dispatch(&self, algo: Algorithm, path: PathBuf, root: PathBuf) {
+    fn dispatch(&self, algo: Algorithm, path: PathBuf) {
         let map = self.map.clone();
         rocket::tokio::spawn(async move {
             {
@@ -100,7 +99,7 @@ impl CachedCompression {
             };
 
             let success =
-                match Self::compress(compressor, &root.join(&path), &root.join(new_path)).await {
+                match Self::compress(compressor, &path, &new_path).await {
                     Ok(()) => true,
                     Err(_e) => {
                         // TODO: log error
@@ -123,6 +122,8 @@ impl CachedCompression {
     }
 
     async fn compress(mut compressor: Compress, path: &Path, new_path: &Path) -> io::Result<()> {
+        // This isn't the ideal API to be using, but flate2 only provides sync APIs, so I have to
+        // deal with the async files for it.
         let mut input = rocket::tokio::fs::File::open(path).await?;
         let mut output = rocket::tokio::fs::File::create(new_path).await?;
         let mut input_buf = [0u8; 1024];
@@ -177,32 +178,30 @@ impl Rewrite for CachedCompression {
         &self,
         req: &rocket::Request<'_>,
         path: rocket::fs::FileServerResponse,
-        root: &std::path::Path,
+        _root: &std::path::Path,
     ) -> rocket::fs::FileServerResponse {
         match path {
             FileServerResponse::File {
-                mut name,
-                modified,
+                mut path,
                 mut headers,
             } => {
                 if let Some(algo) = self.get_valid(req) {
-                    if let Some(info) = self.map.get(&name) {
+                    if let Some(info) = self.map.get(&path) {
                         if info.compressions.contains(&algo) {
                             // TODO: this unwraps a bunch of errors, that should be handled
                             let new_name =
-                                format!("{}.{algo}", name.file_name().unwrap().to_str().unwrap());
-                            name.set_file_name(new_name);
+                                format!("{}.{algo}", path.file_name().unwrap().to_str().unwrap());
+                            path.set_file_name(new_name);
                             headers.add(Header::new("Content-Encoding", algo.to_string()));
                         } else {
-                            self.dispatch(algo, name.clone(), root.to_path_buf());
+                            self.dispatch(algo, path.clone());
                         }
                     } else {
-                        self.dispatch(algo, name.clone(), root.to_path_buf());
+                        self.dispatch(algo, path.clone());
                     }
                 }
                 FileServerResponse::File {
-                    name,
-                    modified,
+                    path,
                     headers,
                 }
             }
