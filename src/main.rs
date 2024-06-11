@@ -8,7 +8,13 @@ use std::{
 use dashmap::DashMap;
 use flate2::{Compress, Compression, Status};
 use rocket::{
-    build, fs::{FileServer, FileServerResponse, Index, NormalizeDirs, Options, Rewrite}, http::Header, launch, tokio::io::{AsyncReadExt, AsyncWriteExt}
+    build,
+    fs::{
+        dir_root, filter_dotfiles, index, normalize_dirs, File, FileResponse, FileServer, Rewriter,
+    },
+    http::{ContentType, Header},
+    launch,
+    tokio::io::{AsyncReadExt, AsyncWriteExt},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -98,15 +104,14 @@ impl CachedCompression {
                 Algorithm::Gzip => Compress::new_gzip(Compression::new(9), 15),
             };
 
-            let success =
-                match Self::compress(compressor, &path, &new_path).await {
-                    Ok(()) => true,
-                    Err(_e) => {
-                        // TODO: log error
-                        println!("Error: {_e:?}");
-                        false
-                    }
-                };
+            let success = match Self::compress(compressor, &path, &new_path).await {
+                Ok(()) => true,
+                Err(_e) => {
+                    // TODO: log error
+                    println!("Error: {_e:?}");
+                    false
+                }
+            };
             {
                 let mut v = map.entry(path.clone()).or_insert(Info {
                     compressions: vec![],
@@ -173,37 +178,42 @@ impl CachedCompression {
     }
 }
 
-impl Rewrite for CachedCompression {
-    fn rewrite(
+fn content_type_from_path(path: impl AsRef<Path>) -> Option<ContentType> {
+    ContentType::from_extension(path.as_ref().extension()?.to_str()?)
+}
+
+impl Rewriter for CachedCompression {
+    fn rewrite<'p, 'h>(
         &self,
+        path: Option<FileResponse<'p, 'h>>,
         req: &rocket::Request<'_>,
-        path: rocket::fs::FileServerResponse,
-        _root: &std::path::Path,
-    ) -> rocket::fs::FileServerResponse {
+    ) -> Option<FileResponse<'p, 'h>> {
         match path {
-            FileServerResponse::File {
+            Some(FileResponse::File(File {
                 mut path,
                 mut headers,
-            } => {
+            })) => {
                 if let Some(algo) = self.get_valid(req) {
-                    if let Some(info) = self.map.get(&path) {
+                    if let Some(info) = self.map.get(path.as_ref()) {
                         if info.compressions.contains(&algo) {
+                            // Since we change the path, it seems like we override any
+                            // automatic content-type detection, so we just do it manually
+                            if let Some(ct) = content_type_from_path(&path) {
+                                headers.add(ct);
+                            }
+                            headers.add(Header::new("Content-Encoding", algo.to_string()));
                             // TODO: this unwraps a bunch of errors, that should be handled
                             let new_name =
                                 format!("{}.{algo}", path.file_name().unwrap().to_str().unwrap());
-                            path.set_file_name(new_name);
-                            headers.add(Header::new("Content-Encoding", algo.to_string()));
+                            path.to_mut().set_file_name(new_name);
                         } else {
-                            self.dispatch(algo, path.clone());
+                            self.dispatch(algo, path.clone().into_owned());
                         }
                     } else {
-                        self.dispatch(algo, path.clone());
+                        self.dispatch(algo, path.clone().into_owned());
                     }
                 }
-                FileServerResponse::File {
-                    path,
-                    headers,
-                }
+                Some(FileResponse::File(File { path, headers }))
             }
             path => path,
         }
@@ -212,12 +222,13 @@ impl Rewrite for CachedCompression {
 
 #[launch]
 fn launch() -> _ {
-    build()
-        .mount(
-            "/",
-            FileServer::new("static", Options::None)
-                .rewrite(NormalizeDirs)
-                .rewrite(Index("index.txt"))
-                .rewrite(CachedCompression::new()),
-        )
+    build().mount(
+        "/",
+        FileServer::empty()
+            .filter_file(filter_dotfiles)
+            .map_file(dir_root("static"))
+            .map_file(normalize_dirs)
+            .map_file(index("index.txt"))
+            .and_rewrite(CachedCompression::new()),
+    )
 }
