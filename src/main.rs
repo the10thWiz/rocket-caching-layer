@@ -65,6 +65,7 @@ impl CachedCompression {
             .flat_map(|v| v.split(|c| c == ','))
             .filter_map(|coding| {
                 // TODO: Parsing Hack. Filters everything after the `;`, and the whole item if `q = 0`
+                // Will select client's preferred, assume the client placed them in preferred order.
                 if let Some((name, params)) = coding.split_once(';') {
                     if let Some((param_name, val)) = params.split_once('=') {
                         let val: f32 = val.trim().parse().unwrap_or(0.);
@@ -178,6 +179,7 @@ impl CachedCompression {
     }
 }
 
+// This might be a good addition to `ContentType` itself
 fn content_type_from_path(path: impl AsRef<Path>) -> Option<ContentType> {
     ContentType::from_extension(path.as_ref().extension()?.to_str()?)
 }
@@ -194,21 +196,22 @@ impl Rewriter for CachedCompression {
                 mut headers,
             })) => {
                 if let Some(algo) = self.get_valid(req) {
-                    if let Some(info) = self.map.get(path.as_ref()) {
-                        if info.compressions.contains(&algo) {
-                            // Since we change the path, it seems like we override any
-                            // automatic content-type detection, so we just do it manually
-                            if let Some(ct) = content_type_from_path(&path) {
-                                headers.add(ct);
-                            }
-                            headers.add(Header::new("Content-Encoding", algo.to_string()));
-                            // TODO: this unwraps a bunch of errors, that should be handled
-                            let new_name =
-                                format!("{}.{algo}", path.file_name().unwrap().to_str().unwrap());
-                            path.to_mut().set_file_name(new_name);
-                        } else {
-                            self.dispatch(algo, path.clone().into_owned());
+                    if self
+                        .map
+                        .get(path.as_ref())
+                        .is_some_and(|info| info.compressions.contains(&algo))
+                    {
+                        // Since we change the path, it seems like we override any
+                        // automatic content-type detection, so we just do it manually
+                        // We could implement this directly on File as well
+                        if let Some(ct) = content_type_from_path(&path) {
+                            headers.add(ct);
                         }
+                        headers.add(Header::new("Content-Encoding", algo.to_string()));
+                        // TODO: this unwraps a bunch of errors, that should be handled
+                        let new_name =
+                            format!("{}.{algo}", path.file_name().unwrap().to_str().unwrap());
+                        path.to_mut().set_file_name(new_name);
                     } else {
                         self.dispatch(algo, path.clone().into_owned());
                     }
