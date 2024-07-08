@@ -8,17 +8,13 @@ use std::{
 use dashmap::DashMap;
 use flate2::{Compress, Compression, Status};
 use rocket::{
-    build,
-    fs::{
-        dir_root, filter_dotfiles, index, normalize_dirs, File, FileResponse, FileServer, Rewriter,
-    },
+    fs::rewrite::{Rewrite, Rewriter},
     http::{ContentType, Header},
-    launch,
     tokio::io::{AsyncReadExt, AsyncWriteExt},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Algorithm {
+pub enum Algorithm {
     Gzip,
 }
 
@@ -48,12 +44,12 @@ struct Info {
     pending: Vec<Algorithm>,
 }
 
-struct CachedCompression {
+pub struct CachedCompression {
     map: Arc<DashMap<PathBuf, Info>>,
 }
 
 impl CachedCompression {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             map: Arc::new(DashMap::new()),
         }
@@ -185,53 +181,109 @@ fn content_type_from_path(path: impl AsRef<Path>) -> Option<ContentType> {
 }
 
 impl Rewriter for CachedCompression {
-    fn rewrite<'p, 'h>(
+    fn rewrite<'h>(
         &self,
-        path: Option<FileResponse<'p, 'h>>,
+        path: Option<Rewrite<'h>>,
         req: &rocket::Request<'_>,
-    ) -> Option<FileResponse<'p, 'h>> {
+    ) -> Option<Rewrite<'h>> {
         match path {
-            Some(FileResponse::File(File {
-                mut path,
-                mut headers,
-            })) => {
+            Some(Rewrite::File(mut file)) => {
                 if let Some(algo) = self.get_valid(req) {
                     if self
                         .map
-                        .get(path.as_ref())
+                        .get(file.path.as_ref())
                         .is_some_and(|info| info.compressions.contains(&algo))
                     {
                         // Since we change the path, it seems like we override any
                         // automatic content-type detection, so we just do it manually
                         // We could implement this directly on File as well
-                        if let Some(ct) = content_type_from_path(&path) {
-                            headers.add(ct);
+                        if let Some(ct) = content_type_from_path(&file.path) {
+                            file.headers.add(ct);
                         }
-                        headers.add(Header::new("Content-Encoding", algo.to_string()));
+                        file.headers
+                            .add(Header::new("Content-Encoding", algo.to_string()));
                         // TODO: this unwraps a bunch of errors, that should be handled
-                        let new_name =
-                            format!("{}.{algo}", path.file_name().unwrap().to_str().unwrap());
-                        path.to_mut().set_file_name(new_name);
+                        let new_name = format!(
+                            "{}.{algo}",
+                            file.path.file_name().unwrap().to_str().unwrap()
+                        );
+                        file.path.to_mut().set_file_name(new_name);
                     } else {
-                        self.dispatch(algo, path.clone().into_owned());
+                        self.dispatch(algo, file.path.clone().into_owned());
                     }
                 }
-                Some(FileResponse::File(File { path, headers }))
+                Some(Rewrite::File(file))
             }
             path => path,
         }
     }
 }
 
-#[launch]
-fn launch() -> _ {
-    build().mount(
-        "/",
-        FileServer::empty()
-            .filter_file(filter_dotfiles)
-            .map_file(dir_root("static"))
-            .map_file(normalize_dirs)
-            .map_file(index("index.txt"))
-            .and_rewrite(CachedCompression::new()),
-    )
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use rocket::{
+        async_test, build,
+        fs::{rewrite::DirIndex, FileServer},
+        http::Status,
+        local::asynchronous::Client,
+        tokio::time::sleep,
+        Build, Rocket,
+    };
+
+    use super::*;
+
+    fn launch() -> Rocket<Build> {
+        build().mount(
+            "/",
+            FileServer::without_index("static")
+                .rewrite(DirIndex::unconditional("index.txt"))
+                .rewrite(CachedCompression::new()),
+        )
+    }
+
+    async fn gzipped_req(
+        client: &mut Client,
+        accept: impl Into<Option<&'static str>>,
+        compressed: bool,
+    ) {
+        let res = client.get("/");
+        let res = match accept.into() {
+            Some(accept) => res.header(Header::new("Accept-Encoding", accept)),
+            None => res,
+        }
+        .dispatch()
+        .await;
+        assert_eq!(res.status(), Status::Ok);
+        assert_eq!(res.headers().get_one("Content-Type").unwrap(), "text/plain; charset=utf-8");
+        if compressed {
+            assert_eq!(res.headers().get_one("Content-Encoding").unwrap(), "gzip");
+            assert_eq!(
+                res.into_bytes().await.unwrap(),
+                include_bytes!("../static/index.txt.pre-gziped")
+            );
+        } else {
+            assert_eq!(res.headers().get_one("Content-Encoding"), None);
+            assert_eq!(
+                res.into_string().await.unwrap(),
+                include_str!("../static/index.txt")
+            );
+        }
+    }
+
+    #[async_test]
+    async fn simple_test() {
+        let mut client = Client::untracked(launch()).await.unwrap();
+        gzipped_req(&mut client, "gzip", false).await;
+        sleep(Duration::from_millis(400)).await;
+
+        gzipped_req(&mut client, "gzip", true).await;
+        gzipped_req(&mut client, "gzip; q=1", true).await;
+        gzipped_req(&mut client, "gzip; q = 0.5", true).await;
+        gzipped_req(&mut client, "gzip; q = 0", false).await;
+        gzipped_req(&mut client, "flate", false).await;
+        gzipped_req(&mut client, "flate,gzip", true).await;
+        gzipped_req(&mut client, None, false).await;
+    }
 }

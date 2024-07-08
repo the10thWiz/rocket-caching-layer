@@ -8,4 +8,9 @@ edition = "2021"
 [dependencies]
 dashmap = "5.5.3"
 flate2 = { version = "1.0.30", features = ["zlib"] }
-rocket = { version = "0.6.0-dev", path = "../rocket/core/lib" }
+
+[dependencies.rocket]
+version = "0.6.0-dev"
+git = "https://github.com/rwf2/Rocket.git"
+rev = "f50b604"
+default-features = false
