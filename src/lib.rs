@@ -1,3 +1,4 @@
+#[deny(missing_docs)]
 use std::{
     fmt::Display,
     io,
@@ -13,6 +14,7 @@ use rocket::{
     tokio::io::{AsyncReadExt, AsyncWriteExt},
 };
 
+/// Supported compression algorithms
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Algorithm {
     Gzip,
@@ -44,11 +46,19 @@ struct Info {
     pending: Vec<Algorithm>,
 }
 
+/// A rewriter for `FileServer`, that implements cached compression.
+///
+/// Implements caching by storing a compressed copy of the file to be served.
+/// When a request is made for a file for the first time, a task is dispatched
+/// to generate a compressed copy of the file, and future requests (after the
+/// compression task has completed) will send the compressed version.
 pub struct CachedCompression {
     map: Arc<DashMap<PathBuf, Info>>,
 }
 
 impl CachedCompression {
+    /// Create a default caching compression rewrite. Should be added at or near
+    /// the end of the chain.
     pub fn new() -> Self {
         Self {
             map: Arc::new(DashMap::new()),
