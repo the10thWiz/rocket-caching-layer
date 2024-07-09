@@ -11,7 +11,7 @@ use flate2::{Compress, Compression, Status};
 use rocket::{
     fs::rewrite::{Rewrite, Rewriter},
     http::{ContentType, Header},
-    tokio::io::{AsyncReadExt, AsyncWriteExt},
+    tokio::io::{AsyncReadExt, AsyncWriteExt}, trace::error,
 };
 
 /// Supported compression algorithms
@@ -70,22 +70,15 @@ impl CachedCompression {
             .get("Accept-Encoding")
             .flat_map(|v| v.split(|c| c == ','))
             .filter_map(|coding| {
-                // TODO: Parsing Hack. Filters everything after the `;`, and the whole item if `q = 0`
-                // Will select client's preferred, assume the client placed them in preferred order.
-                if let Some((name, params)) = coding.split_once(';') {
-                    if let Some((param_name, val)) = params.split_once('=') {
-                        let val: f32 = val.trim().parse().unwrap_or(0.);
-                        if val != 0. || param_name.trim() != "q" {
-                            Some(name.trim())
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
+                let mut parts = coding.split(';');
+                let name = parts.next()?;
+                for (p, val) in parts.filter_map(|p| p.split_once('=')) {
+                    let val: f32 = val.trim().parse().unwrap_or(0.);
+                    if val == 0. && p.trim() == "q" {
+                        return None;
                     }
-                } else {
-                    Some(coding.trim())
                 }
+                Some(name.trim())
             })
             .filter_map(|coding| Algorithm::from_name(coding))
             .nth(0)
@@ -113,9 +106,8 @@ impl CachedCompression {
 
             let success = match Self::compress(compressor, &path, &new_path).await {
                 Ok(()) => true,
-                Err(_e) => {
-                    // TODO: log error
-                    println!("Error: {_e:?}");
+                Err(e) => {
+                    error!(?e, "Error when compressing file {}", path.display());
                     false
                 }
             };
@@ -212,10 +204,9 @@ impl Rewriter for CachedCompression {
                         }
                         file.headers
                             .add(Header::new("Content-Encoding", algo.to_string()));
-                        // TODO: this unwraps a bunch of errors, that should be handled
                         let new_name = format!(
                             "{}.{algo}",
-                            file.path.file_name().unwrap().to_str().unwrap()
+                            file.path.file_name().and_then(|s| s.to_str()).unwrap_or("")
                         );
                         file.path.to_mut().set_file_name(new_name);
                     } else {
@@ -266,7 +257,10 @@ mod tests {
         .dispatch()
         .await;
         assert_eq!(res.status(), Status::Ok);
-        assert_eq!(res.headers().get_one("Content-Type").unwrap(), "text/plain; charset=utf-8");
+        assert_eq!(
+            res.headers().get_one("Content-Type").unwrap(),
+            "text/plain; charset=utf-8"
+        );
         if compressed {
             assert_eq!(res.headers().get_one("Content-Encoding").unwrap(), "gzip");
             assert_eq!(
